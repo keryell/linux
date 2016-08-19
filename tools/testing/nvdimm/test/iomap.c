@@ -112,7 +112,8 @@ void *__wrap_devm_memremap_pages(struct device *dev, struct resource *res,
 
 	if (nfit_res)
 		return nfit_res->buf + offset - nfit_res->res.start;
-	return devm_memremap_pages(dev, res, ref, altmap, NULL, NULL);
+	return devm_memremap_pages(dev, res, ref, altmap, NULL,
+				   NULL, NULL, NULL, MEMORY_DEVICE);
 }
 EXPORT_SYMBOL(__wrap_devm_memremap_pages);
 

@@ -18,6 +18,8 @@
 #include <linux/io.h>
 #include <linux/mm.h>
 #include <linux/memory_hotplug.h>
+#include <linux/swap.h>
+#include <linux/swapops.h>
 
 #ifndef ioremap_cache
 /* temporary while we convert existing ioremap_cache users to memremap */
@@ -200,6 +202,21 @@ void put_zone_device_page(struct page *page)
 }
 EXPORT_SYMBOL(put_zone_device_page);
 
+#if IS_ENABLED(CONFIG_DEVICE_UNADDRESSABLE)
+int device_entry_fault(struct vm_area_struct *vma,
+		       unsigned long addr,
+		       swp_entry_t entry,
+		       unsigned flags,
+		       pmd_t *pmdp)
+{
+	struct page *page = device_entry_to_page(entry);
+
+	BUG_ON(!page->pgmap->page_fault);
+	return page->pgmap->page_fault(vma, addr, page, flags, pmdp);
+}
+EXPORT_SYMBOL(device_entry_fault);
+#endif /* CONFIG_DEVICE_UNADDRESSABLE */
+
 static void pgmap_radix_release(struct resource *res)
 {
 	resource_size_t key, align_start, align_size, align_end;
@@ -252,7 +269,7 @@ static void devm_memremap_pages_release(struct device *dev, void *data)
 	/* pages are dead and unused, undo the arch mapping */
 	align_start = res->start & ~(SECTION_SIZE - 1);
 	align_size = ALIGN(resource_size(res), SECTION_SIZE);
-	arch_remove_memory(align_start, align_size, MEMORY_DEVICE);
+	arch_remove_memory(align_start, align_size, pgmap->flags);
 	untrack_pfn(NULL, PHYS_PFN(align_start), align_size);
 	pgmap_radix_release(res);
 	dev_WARN_ONCE(dev, pgmap->altmap && pgmap->altmap->alloc,
@@ -276,8 +293,11 @@ struct dev_pagemap *find_dev_pagemap(resource_size_t phys)
  * @res: "host memory" address range
  * @ref: a live per-cpu reference count
  * @altmap: optional descriptor for allocating the memmap from @res
+ * @ppgmap: pointer set to new page dev_pagemap on success
+ * @page_fault: callback for CPU page fault on un-addressable memory
  * @page_free: callback call when page refcount reach 1 ie it is free
  * @data: privata data pointer for page_free
+ * @flags: device memory flags (look for MEMORY_DEVICE_* memory_hotplug.h)
  *
  * Notes:
  * 1/ @ref must be 'live' on entry and 'dead' before devm_memunmap_pages() time
@@ -289,8 +309,10 @@ struct dev_pagemap *find_dev_pagemap(resource_size_t phys)
  */
 void *devm_memremap_pages(struct device *dev, struct resource *res,
 			  struct percpu_ref *ref, struct vmem_altmap *altmap,
+			  struct dev_pagemap **ppgmap,
+			  dev_page_fault_t page_fault,
 			  dev_page_free_t page_free,
-			  void *data)
+			  void *data, int flags)
 {
 	resource_size_t key, align_start, align_size, align_end;
 	pgprot_t pgprot = PAGE_KERNEL;
@@ -298,6 +320,17 @@ void *devm_memremap_pages(struct device *dev, struct resource *res,
 	struct page_map *page_map;
 	int error, nid, is_ram;
 	unsigned long pfn;
+
+	if (!(flags & MEMORY_DEVICE)) {
+		WARN_ONCE(1, "%s attempted on non device memory\n", __func__);
+		return ERR_PTR(-EINVAL);
+	}
+
+	if (altmap && (flags & MEMORY_DEVICE_UNADDRESSABLE)) {
+		WARN_ONCE(1, "%s with altmap for un-addressable "
+			  "device memory\n", __func__);
+		return ERR_PTR(-EINVAL);
+	}
 
 	align_start = res->start & ~(SECTION_SIZE - 1);
 	align_size = ALIGN(res->start + resource_size(res), SECTION_SIZE)
@@ -332,8 +365,10 @@ void *devm_memremap_pages(struct device *dev, struct resource *res,
 	}
 	pgmap->ref = ref;
 	pgmap->res = &page_map->res;
+	pgmap->page_fault = page_fault;
 	pgmap->page_free = page_free;
 	pgmap->data = data;
+	pgmap->flags = flags;
 
 	mutex_lock(&pgmap_lock);
 	error = 0;
@@ -370,7 +405,7 @@ void *devm_memremap_pages(struct device *dev, struct resource *res,
 	if (error)
 		goto err_pfn_remap;
 
-	error = arch_add_memory(nid, align_start, align_size, MEMORY_DEVICE);
+	error = arch_add_memory(nid, align_start, align_size, pgmap->flags);
 	if (error)
 		goto err_add_memory;
 
@@ -387,6 +422,8 @@ void *devm_memremap_pages(struct device *dev, struct resource *res,
 		page->pgmap = pgmap;
 	}
 	devres_add(dev, page_map);
+	if (ppgmap)
+		*ppgmap = pgmap;
 	return __va(res->start);
 
  err_add_memory:
