@@ -111,7 +111,8 @@ static int dax_pmem_probe(struct device *dev)
 	if (rc)
 		return rc;
 
-	addr = devm_memremap_pages(dev, &res, &dax_pmem->ref, altmap);
+	addr = devm_memremap_pages(dev, &res, &dax_pmem->ref,
+				   altmap, NULL, NULL);
 	if (IS_ERR(addr))
 		return PTR_ERR(addr);
 
