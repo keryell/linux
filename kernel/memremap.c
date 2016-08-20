@@ -387,6 +387,20 @@ void *devm_memremap_pages(struct device *dev, struct resource *res,
 }
 EXPORT_SYMBOL(devm_memremap_pages);
 
+static int devm_page_map_match(struct device *dev, void *data, void *match_data)
+{
+	struct page_map *page_map = data;
+
+	return __va(page_map->res.start) == match_data;
+}
+
+int devm_memunmap_pages(struct device *dev, void *start)
+{
+	return devres_release(dev, &devm_memremap_pages_release,
+			      &devm_page_map_match, start);
+}
+EXPORT_SYMBOL(devm_memunmap_pages);
+
 unsigned long vmem_altmap_offset(struct vmem_altmap *altmap)
 {
 	/* number of pfns from base where pfn_to_page() is valid */

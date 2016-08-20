@@ -53,6 +53,7 @@ struct dev_pagemap {
 void *devm_memremap_pages(struct device *dev, struct resource *res,
 		struct percpu_ref *ref, struct vmem_altmap *altmap);
 struct dev_pagemap *find_dev_pagemap(resource_size_t phys);
+int devm_memunmap_pages(struct device *dev, void *start);
 
 static inline bool dev_page_allow_migrate(const struct page *page)
 {
@@ -76,6 +77,11 @@ static inline void *devm_memremap_pages(struct device *dev,
 static inline struct dev_pagemap *find_dev_pagemap(resource_size_t phys)
 {
 	return NULL;
+}
+
+static inline int devm_memunmap_pages(struct device *dev, void *start)
+{
+	return -EINVAL;
 }
 
 static inline bool dev_page_allow_migrate(const struct page *page)
