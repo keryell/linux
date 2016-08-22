@@ -40,6 +40,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/page_idle.h>
 #include <linux/page_owner.h>
+#include <linux/memremap.h>
 
 #include <asm/tlbflush.h>
 
@@ -248,7 +249,15 @@ static int remove_migration_pte(struct page *new, struct vm_area_struct *vma,
 		pte = arch_make_huge_pte(pte, vma, new, 0);
 	}
 #endif
-	flush_dcache_page(new);
+
+	if (unlikely(is_zone_device_page(new)) && !is_addressable_page(new)) {
+		entry = make_device_entry(new, pte_write(pte));
+		pte = swp_entry_to_pte(entry);
+		if (pte_swp_soft_dirty(*ptep))
+			pte = pte_mksoft_dirty(pte);
+	} else
+		flush_dcache_page(new);
+
 	set_pte_at(mm, addr, ptep, pte);
 
 	if (PageHuge(new)) {
