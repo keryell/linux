@@ -27,6 +27,7 @@
 #include <linux/kthread.h>
 #include <linux/slab.h>
 #include <linux/migrate.h>
+#include <linux/memremap.h>
 #include <linux/ratelimit.h>
 #include <linux/uuid.h>
 #include <linux/semaphore.h>
@@ -1046,9 +1047,13 @@ out_w_error:
 
 #ifdef CONFIG_MIGRATION
 static int btree_migratepage(struct address_space *mapping,
-			struct page *newpage, struct page *page,
-			enum migrate_mode mode)
+			     struct page *newpage, struct page *page,
+			     enum migrate_mode mode, bool copy)
 {
+	/* Can only migrate addressable memory for now */
+	if (!is_addressable_page(newpage))
+		return -EINVAL;
+
 	/*
 	 * we can't safely write a btree page from here,
 	 * we haven't done the locking hook
@@ -1062,7 +1067,7 @@ static int btree_migratepage(struct address_space *mapping,
 	if (page_has_private(page) &&
 	    !try_to_release_page(page, GFP_KERNEL))
 		return -EAGAIN;
-	return migrate_page(mapping, newpage, page, mode);
+	return migrate_page(mapping, newpage, page, mode, copy);
 }
 #endif
 
