@@ -14,6 +14,7 @@
 #include <linux/writeback.h>
 #include <linux/swap.h>
 #include <linux/migrate.h>
+#include <linux/memremap.h>
 
 #include <linux/sunrpc/clnt.h>
 #include <linux/nfs_fs.h>
@@ -2023,8 +2024,12 @@ out_error:
 
 #ifdef CONFIG_MIGRATION
 int nfs_migrate_page(struct address_space *mapping, struct page *newpage,
-		struct page *page, enum migrate_mode mode)
+		     struct page *page, enum migrate_mode mode, bool copy)
 {
+	/* Can only migrate addressable memory for now */
+	if (!is_addressable_page(newpage))
+		return -EINVAL;
+
 	/*
 	 * If PagePrivate is set, then the page is currently associated with
 	 * an in-progress read or write request. Don't try to migrate it.
@@ -2039,7 +2044,7 @@ int nfs_migrate_page(struct address_space *mapping, struct page *newpage,
 	if (!nfs_fscache_release_page(page, GFP_KERNEL))
 		return -EBUSY;
 
-	return migrate_page(mapping, newpage, page, mode);
+	return migrate_page(mapping, newpage, page, mode, copy);
 }
 #endif
 
