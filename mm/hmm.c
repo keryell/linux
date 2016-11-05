@@ -23,9 +23,14 @@
 #include <linux/swap.h>
 #include <linux/slab.h>
 #include <linux/sched.h>
+#include <linux/mmzone.h>
+#include <linux/pagemap.h>
 #include <linux/swapops.h>
 #include <linux/hugetlb.h>
+#include <linux/memremap.h>
 #include <linux/mmu_notifier.h>
+
+#define SECTION_SIZE (1UL << PA_SECTION_SHIFT)
 
 
 /*
@@ -735,3 +740,251 @@ int hmm_vma_fault(struct vm_area_struct *vma,
 }
 EXPORT_SYMBOL(hmm_vma_fault);
 #endif /* IS_ENABLED(CONFIG_HMM_MIRROR) */
+
+
+#if IS_ENABLED(CONFIG_HMM_DEVMEM)
+struct page *hmm_vma_alloc_locked_page(struct vm_area_struct *vma,
+				       unsigned long addr)
+{
+	struct page *page;
+
+	page = alloc_page_vma(GFP_HIGHUSER, vma, addr);
+	if (!page)
+		return NULL;
+	lock_page(page);
+	return page;
+}
+EXPORT_SYMBOL(hmm_vma_alloc_locked_page);
+
+
+static void hmm_devmem_release(struct percpu_ref *ref)
+{
+	struct hmm_devmem *devmem;
+
+	devmem = container_of(ref, struct hmm_devmem, ref);
+	complete(&devmem->completion);
+	devmem->inuse = false;
+}
+
+static void hmm_devmem_exit(void *data)
+{
+	struct percpu_ref *ref = data;
+	struct hmm_devmem *devmem;
+
+	devmem = container_of(ref, struct hmm_devmem, ref);
+	percpu_ref_exit(ref);
+	devm_remove_action(devmem->device, hmm_devmem_exit, data);
+}
+
+static void hmm_devmem_kill(void *data)
+{
+	struct percpu_ref *ref = data;
+	struct hmm_devmem *devmem;
+
+	devmem = container_of(ref, struct hmm_devmem, ref);
+	devmem->inuse = false;
+	percpu_ref_kill(ref);
+	wait_for_completion(&devmem->completion);
+	devm_remove_action(devmem->device, hmm_devmem_kill, data);
+}
+
+static int hmm_devmem_fault(struct vm_area_struct *vma,
+			    unsigned long addr,
+			    struct page *page,
+			    unsigned flags,
+			    pmd_t *pmdp)
+{
+	struct hmm_devmem *devmem = page->pgmap->data;
+
+	return devmem->ops->fault(devmem, vma, addr, page, flags, pmdp);
+}
+
+static void hmm_devmem_free(struct page *page, void *data)
+{
+	struct hmm_devmem *devmem = data;
+
+	devmem->ops->free(devmem, page);
+}
+
+/*
+ * hmm_devmem_add() - hotplug fake ZONE_DEVICE memory for device memory
+ *
+ * @devmem: hmm_devmem struct use to track and manage the ZONE_DEVICE memory
+ * @ops: memory event device driver callback (see struct hmm_devmem_ops)
+ * @device: device struct to bind the resource too
+ * @size: size in bytes of the device memory to add
+ * Returns: 0 on success, error code otherwise
+ *
+ * This first find an empty range of physical address big enough to for the new
+ * resource and then hotplug it as ZONE_DEVICE memory allocating struct page.
+ * It does not do anything beside that, all events affecting the memory will go
+ * through the various callback provided by hmm_devmem_ops struct.
+ */
+int hmm_devmem_add(struct hmm_devmem *devmem,
+		   const struct hmm_devmem_ops *ops,
+		   struct device *device,
+		   unsigned long size)
+{
+	const struct resource *res;
+	resource_size_t addr;
+	void *ptr;
+	int ret;
+
+	init_completion(&devmem->completion);
+	devmem->pfn_first = -1UL;
+	devmem->pfn_last = -1UL;
+	devmem->resource = NULL;
+	devmem->device = device;
+	devmem->pagemap = NULL;
+	devmem->inuse = false;
+	devmem->ops = ops;
+
+	ret = percpu_ref_init(&devmem->ref,&hmm_devmem_release,0,GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	ret = devm_add_action(device, hmm_devmem_exit, &devmem->ref);
+	if (ret)
+		goto error;
+
+	size = ALIGN(size, SECTION_SIZE);
+	addr = (1UL << MAX_PHYSMEM_BITS) - size;
+
+	/*
+	 * FIXME add a new helper to quickly walk resource tree and find free
+	 * range
+	 *
+	 * FIXME what about ioport_resource resource ?
+	 */
+	for (; addr > size; addr -= size) {
+		ret = region_intersects(addr, size, 0, IORES_DESC_NONE);
+		if (ret != REGION_DISJOINT)
+			continue;
+
+		devmem->resource = devm_request_mem_region(device, addr, size,
+							   dev_name(device));
+		if (!devmem->resource) {
+			ret = -ENOMEM;
+			goto error;
+		}
+		devmem->resource->desc = IORES_DESC_UNADDRESSABLE_MEMORY;
+		break;
+	}
+	if (!devmem->resource) {
+		ret = -ERANGE;
+		goto error;
+	}
+
+	ptr = devm_memremap_pages(device, devmem->resource, &devmem->ref,
+				  NULL, &devmem->pagemap,
+				  hmm_devmem_fault, hmm_devmem_free, devmem,
+				  MEMORY_DEVICE | MEMORY_DEVICE_ALLOW_MIGRATE |
+				  MEMORY_DEVICE_UNADDRESSABLE);
+	if (IS_ERR(ptr)) {
+		ret = PTR_ERR(ptr);
+		goto error;
+	}
+
+	ret = devm_add_action(device, hmm_devmem_kill, &devmem->ref);
+	if (ret) {
+		hmm_devmem_kill(&devmem->ref);
+		goto error;
+	}
+
+	res = devmem->pagemap->res;
+	devmem->pfn_first = res->start >> PAGE_SHIFT;
+	devmem->pfn_last = (resource_size(res)>>PAGE_SHIFT)+devmem->pfn_first;
+	devmem->inuse = true;
+
+	return 0;
+
+error:
+	hmm_devmem_exit(&devmem->ref);
+	return ret;
+}
+EXPORT_SYMBOL(hmm_devmem_add);
+
+/*
+ * hmm_devmem_remove() - remove device memory (kill and free ZONE_DEVICE)
+ *
+ * @devmem: hmm_devmem struct use to track and manage the ZONE_DEVICE memory
+ * Returns: true if device memory is no longer in use, false if still in use
+ *
+ * This will hot remove memory that was hotplug by hmm_devmem_add on behalf of
+ * device driver. It will free struct page and remove the resource that reserve
+ * the physical address range for this device memory.
+ *
+ * Device driver can not free the struct while this function return false, it
+ * must call over and over this function until it returns true. Note that if
+ * there is a refcount bug this might never happen !
+ */
+bool hmm_devmem_remove(struct hmm_devmem *devmem)
+{
+	struct device *device = devmem->device;
+
+	hmm_devmem_kill(&devmem->ref);
+
+	if (devmem->pagemap) {
+		const struct resource *res = devmem->pagemap->res;
+
+		devm_memunmap_pages(device, __va(res->start));
+		devmem->pagemap = NULL;
+	}
+
+	hmm_devmem_exit(&devmem->ref);
+
+	/* FIXME maybe wait a bit ? */
+	if (devmem->inuse)
+		return false;
+
+	if (devmem->resource) {
+		resource_size_t size = resource_size(devmem->resource);
+
+		devm_release_mem_region(device, devmem->resource->start, size);
+		devmem->resource = NULL;
+	}
+
+	return true;
+}
+EXPORT_SYMBOL(hmm_devmem_remove);
+
+/*
+ * hmm_devmem_fault_range() - migrate back a virtual range of memory
+ *
+ * @devmem: hmm_devmem struct use to track and manage the ZONE_DEVICE memory
+ * @vma: virtual memory area containing the range to be migrated
+ * @ops: migration callback for allocating destination memory and copying
+ * @src_pfns: array of hmm_pfn_t containing source pfns
+ * @dst_pfns: array of hmm_pfn_t containing destination pfns
+ * @start: start address of the range to migrate (inclusive)
+ * @addr: fault address (must be inside the range)
+ * @end: end address of the range to migrate (exclusive)
+ * @private: pointer passed back to each of the callback
+ * Returns: 0 on success, VM_FAULT_SIGBUS on error
+ *
+ * This is a wrapper around hmm_vma_migrate() which check the migration status
+ * for a given fault address and return corresponding page fault handler status
+ * ie 0 on success or VM_FAULT_SIGBUS if migration failed for fault address.
+ *
+ * This is an helper intendend to be use by ZONE_DEVICE fault handler.
+ */
+int hmm_devmem_fault_range(struct hmm_devmem *devmem,
+			   struct vm_area_struct *vma,
+			   const struct hmm_migrate_ops *ops,
+			   hmm_pfn_t *src_pfns,
+			   hmm_pfn_t *dst_pfns,
+			   unsigned long start,
+			   unsigned long addr,
+			   unsigned long end,
+			   void *private)
+{
+	if (hmm_vma_migrate(ops, vma, src_pfns, dst_pfns, start, end, private))
+		return VM_FAULT_SIGBUS;
+
+	if (dst_pfns[(addr - start) >> PAGE_SHIFT] & HMM_PFN_ERROR)
+		return VM_FAULT_SIGBUS;
+
+	return 0;
+}
+EXPORT_SYMBOL(hmm_devmem_fault_range);
+#endif /* IS_ENABLED(CONFIG_HMM_DEVMEM) */
