@@ -88,10 +88,13 @@ struct hmm;
  * HMM_PFN_ERROR: corresponding CPU page table entry point to poisonous memory
  * HMM_PFN_EMPTY: corresponding CPU page table entry is none (pte_none() true)
  * HMM_PFN_DEVICE: this is device memory (ie a ZONE_DEVICE page)
+ * HMM_PFN_LOCKED: underlying struct page is lock
  * HMM_PFN_SPECIAL: corresponding CPU page table entry is special ie result of
  *      vm_insert_pfn() or vm_insert_page() and thus should not be mirror by a
  *      device (the entry will never have HMM_PFN_VALID set and the pfn value
  *      is undefine)
+ * HMM_PFN_MIGRATE: use by hmm_vma_migrate() to signify which address can be
+ *      migrated
  * HMM_PFN_UNADDRESSABLE: unaddressable device memory (ZONE_DEVICE)
  */
 typedef unsigned long hmm_pfn_t;
@@ -102,9 +105,11 @@ typedef unsigned long hmm_pfn_t;
 #define HMM_PFN_ERROR (1 << 3)
 #define HMM_PFN_EMPTY (1 << 4)
 #define HMM_PFN_DEVICE (1 << 5)
-#define HMM_PFN_SPECIAL (1 << 6)
-#define HMM_PFN_UNADDRESSABLE (1 << 7)
-#define HMM_PFN_SHIFT 8
+#define HMM_PFN_LOCKED (1 << 6)
+#define HMM_PFN_SPECIAL (1 << 7)
+#define HMM_PFN_MIGRATE (1 << 8)
+#define HMM_PFN_UNADDRESSABLE (1 << 9)
+#define HMM_PFN_SHIFT 10
 
 /*
  * hmm_pfn_to_page() - return struct page pointed to by a valid hmm_pfn_t
@@ -315,6 +320,61 @@ int hmm_vma_fault(struct vm_area_struct *vma,
 		  bool write,
 		  bool block);
 #endif /* IS_ENABLED(CONFIG_HMM_MIRROR) */
+
+
+#if IS_ENABLED(CONFIG_HMM_MIGRATE)
+/*
+ * struct hmm_migrate_ops - migrate operation callback
+ *
+ * @alloc_and_copy: alloc destination memoiry and copy source to it
+ * @finalize_and_map: allow caller to inspect successfull migrated page
+ *
+ * The new HMM migrate helper hmm_vma_migrate() allow memory migration to use
+ * device DMA engine to perform copy from source to destination memory it also
+ * allow caller to use its own memory allocator for destination memory.
+ *
+ * Note that in alloc_and_copy device driver can decide not to migrate some of
+ * the entry by simply setting corresponding dst_pfns to 0.
+ *
+ * Destination page must locked and HMM_PFN_LOCKED flag set in corresponding
+ * hmm_pfn_t entry of dst_pfns array. It is expected that page allocated will
+ * have an elevated refcount and that a put_page() will free the page.
+ *
+ * Device driver might want to allocate with an extra-refcount if they want to
+ * control deallocation of failed migration inside finalize_and_map() callback.
+ *
+ * Inside finalize_and_map() device driver must use the HMM_PFN_MIGRATE flag to
+ * determine which page have been successfully migrated (this is set inside the
+ * src_pfns array).
+ *
+ * For migration from device memory to system memory device driver must set any
+ * dst_pfns entry to HMM_PFN_ERROR for any entry it can not migrate back due to
+ * hardware fatal failure that can not be recovered. Such failure will trigger
+ * a SIGBUS for the process trying to access such memory.
+ */
+struct hmm_migrate_ops {
+	void (*alloc_and_copy)(struct vm_area_struct *vma,
+			       const hmm_pfn_t *src_pfns,
+			       hmm_pfn_t *dst_pfns,
+			       unsigned long start,
+			       unsigned long end,
+			       void *private);
+	void (*finalize_and_map)(struct vm_area_struct *vma,
+				 const hmm_pfn_t *src_pfns,
+				 hmm_pfn_t *dst_pfns,
+				 unsigned long start,
+				 unsigned long end,
+				 void *private);
+};
+
+int hmm_vma_migrate(const struct hmm_migrate_ops *ops,
+		    struct vm_area_struct *vma,
+		    hmm_pfn_t *src_pfns,
+		    hmm_pfn_t *dst_pfns,
+		    unsigned long start,
+		    unsigned long end,
+		    void *private);
+#endif /* IS_ENABLED(CONFIG_HMM_MIGRATE) */
 
 
 /* Below are for HMM internal use only ! Not to be used by device driver ! */

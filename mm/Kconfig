@@ -308,6 +308,19 @@ config HMM_MIRROR
 	  range of virtual address. This require careful synchronization with
 	  CPU page table update.
 
+config HMM_MIGRATE
+	bool "HMM migrate virtual range of process using device driver DMA"
+	select HMM
+	select MIGRATION
+	help
+	  HMM migrate is a new helper to migrate range of virtual address using
+	  special page allocator and copy callback. This allow device driver to
+	  migrate range of a process memory to its memory using its DMA engine.
+
+	  It obyes all rules of memory migration, except that it supports the
+	  migration of ZONE_DEVICE page that have MEMOY_DEVICE_ALLOW_MIGRATE
+	  flag set.
+
 config PHYS_ADDR_T_64BIT
 	def_bool 64BIT || ARCH_PHYS_ADDR_T_64BIT
 
