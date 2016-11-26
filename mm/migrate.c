@@ -2116,6 +2116,7 @@ static int hmm_collect_walk_pmd(pmd_t *pmdp,
 	struct hmm_migrate *migrate = walk->private;
 	struct mm_struct *mm = walk->vma->vm_mm;
 	unsigned long addr = start;
+	unsigned long unmaped = 0;
 	hmm_pfn_t *src_pfns;
 	spinlock_t *ptl;
 	pte_t *ptep;
@@ -2130,6 +2131,7 @@ again:
 
 	src_pfns = &migrate->src_pfns[(addr - migrate->start) >> PAGE_SHIFT];
 	ptep = pte_offset_map_lock(mm, pmdp, addr, &ptl);
+	arch_enter_lazy_mmu_mode();
 
 	for (; addr < end; addr += PAGE_SIZE, src_pfns++, ptep++) {
 		unsigned long pfn;
@@ -2194,8 +2196,43 @@ again:
 		 * can't be drop from it).
 		 */
 		get_page(page);
+
+		/*
+		 * Optimize for common case where page is only map once in one
+		 * process. If we can lock the page then we can safely setup
+		 * special migration page table entry now.
+		 */
+		if (!trylock_page(page)) {
+			set_pte_at(mm, addr, ptep, pte);
+		} else {
+			pte_t swp_pte;
+
+			*src_pfns |= HMM_PFN_LOCKED;
+			ptep_get_and_clear(mm, addr, ptep);
+
+			/* Setup special migration page table entry */
+			entry = make_migration_entry(page, write);
+			swp_pte = swp_entry_to_pte(entry);
+			if (pte_soft_dirty(pte))
+				swp_pte = pte_swp_mksoft_dirty(swp_pte);
+			set_pte_at(mm, addr, ptep, swp_pte);
+
+			/*
+			 * This is like regulat unmap we remove the rmap and
+			 * drop page refcount. Page won't be free as we took
+			 * a reference just above.
+			 */
+			page_remove_rmap(page, false);
+			put_page(page);
+			unmaped++;
+		}
 	}
+	arch_leave_lazy_mmu_mode();
 	pte_unmap_unlock(ptep - 1, ptl);
+
+	/* Only flush the TLB if we actually modified any entries */
+	if (unmaped)
+		flush_tlb_range(walk->vma, start, end);
 
 	return 0;
 }
@@ -2279,18 +2316,26 @@ static inline bool hmm_migrate_page_check(struct page *page)
 static void hmm_migrate_lock_and_isolate(struct hmm_migrate *migrate)
 {
 	unsigned long addr = migrate->start, i = 0;
+ 	struct mm_struct *mm = migrate->vma->vm_mm;
+ 	struct vm_area_struct *vma = migrate->vma;
+	hmm_pfn_t *src_pfns = migrate->src_pfns;
+	unsigned long restore = 0;
 	bool allow_drain = true;
 
 	lru_add_drain();
 
 	for (; (addr<migrate->end) && migrate->npages; addr+=PAGE_SIZE, i++) {
-		struct page *page = hmm_pfn_to_page(migrate->src_pfns[i]);
+		struct page *page = hmm_pfn_to_page(src_pfns[i]);
+		bool need_restore = true;
 
 		if (!page)
 			continue;
 
-		lock_page(page);
-		migrate->src_pfns[i] |= HMM_PFN_LOCKED;
+		if (!(src_pfns[i] & HMM_PFN_LOCKED)) {
+			lock_page(page);
+			need_restore = false;
+			src_pfns[i] |= HMM_PFN_LOCKED;
+		}
 
 		/* ZONE_DEVICE page are not on LRU */
 		if (!is_zone_device_page(page)) {
@@ -2301,20 +2346,135 @@ static void hmm_migrate_lock_and_isolate(struct hmm_migrate *migrate)
 			}
 
 			if (isolate_lru_page(page)) {
-				migrate->src_pfns[i] = 0;
-				migrate->npages--;
-				unlock_page(page);
-				put_page(page);
+				if (need_restore) {
+					src_pfns[i] &= ~HMM_PFN_MIGRATE;
+					restore++;
+				} else {
+					migrate->npages--;
+					unlock_page(page);
+					src_pfns[i] = 0;
+					put_page(page);
+				}
 			} else
 				/* Drop the reference we took in collect */
 				put_page(page);
 		}
 
 		if (!hmm_migrate_page_check(page)) {
-			migrate->src_pfns[i] = 0;
-			migrate->npages--;
+			if (need_restore) {
+				src_pfns[i] &= ~HMM_PFN_MIGRATE;
+				restore++;
+			} else {
+				migrate->npages--;
+				unlock_page(page);
+				src_pfns[i] = 0;
+				put_page(page);
+			}
+		}
+	}
+
+	if (!restore)
+		return;
+
+	for (addr = migrate->start, i = 0; (addr < migrate->end) && restore;) {
+		struct page *page = hmm_pfn_to_page(src_pfns[i]);
+		unsigned long next, restart;
+		spinlock_t *ptl;
+		pgd_t *pgdp;
+		pud_t *pudp;
+		pmd_t *pmdp;
+		pte_t *ptep;
+
+		if (!page || !(src_pfns[i] & HMM_PFN_MIGRATE)) {
+			addr += PAGE_SIZE;
+			i++;
+			continue;
+		}
+
+		restart = addr;
+
+		/*
+		 * Some one might have zap the mapping. Truncate should be only
+		 * case for which this might happen while holding mmap_sem.
+		 */
+		pgdp = pgd_offset(mm, addr);
+		next = pgd_addr_end(addr, migrate->end);
+		if (!pgdp || pgd_none_or_clear_bad(pgdp))
+			goto unlock_release;
+		pudp = pud_offset(pgdp, addr);
+		next = pud_addr_end(addr, migrate->end);
+		if (!pudp || pud_none(*pudp))
+			goto unlock_release;
+		pmdp = pmd_offset(pudp, addr);
+		next = pmd_addr_end(addr, migrate->end);
+		if (!pmdp || pmd_none(*pmdp) || pmd_trans_huge(*pmdp))
+			goto unlock_release;
+
+		ptep = pte_offset_map_lock(mm, pmdp, addr, &ptl);
+		for (; addr < next; addr += PAGE_SIZE, i++, ptep++) {
+			swp_entry_t entry;
+			bool write;
+			pte_t pte;
+
+			page = hmm_pfn_to_page(src_pfns[i]);
+			if (!page || (src_pfns[i] & HMM_PFN_MIGRATE))
+				continue;
+
+			write = src_pfns[i] & HMM_PFN_WRITE;
+			write &= (vma->vm_flags & VM_WRITE);
+
+			/* Here it means pte must be a valid migration entry */
+			pte = ptep_get_and_clear(mm, addr, ptep);
+			if (pte_none(pte) || pte_present(pte)) {
+				/* SOMETHING BAD IS GOING ON ! */
+				set_pte_at(mm, addr, ptep, pte);
+				continue;
+			}
+			entry = pte_to_swp_entry(pte);
+			if (!is_migration_entry(entry)) {
+				/* SOMETHING BAD IS GOING ON ! */
+				set_pte_at(mm, addr, ptep, pte);
+				continue;
+			}
+
+			if (is_zone_device_page(page) &&
+			    !is_addressable_page(page)) {
+				entry = make_device_entry(page, write);
+				pte = swp_entry_to_pte(entry);
+			} else {
+				pte = mk_pte(page, vma->vm_page_prot);
+				pte = pte_mkold(pte);
+				if (write)
+					pte = pte_mkwrite(pte);
+			}
+			if (pte_swp_soft_dirty(*ptep))
+				pte = pte_mksoft_dirty(pte);
+
+			get_page(page);
+			set_pte_at(mm, addr, ptep, pte);
+			if (PageAnon(page))
+				page_add_anon_rmap(page, vma, addr, false);
+			else
+				page_add_file_rmap(page, false);
+		}
+		pte_unmap_unlock(ptep - 1, ptl);
+
+unlock_release:
+		addr = restart;
+		i = (addr - migrate->start) >> PAGE_SHIFT;
+		for (; addr < next && restore; addr += PAGE_SHIFT, i++) {
+			page = hmm_pfn_to_page(src_pfns[i]);
+			if (!page || (src_pfns[i] & HMM_PFN_MIGRATE))
+				continue;
+
+			src_pfns[i] = 0;
 			unlock_page(page);
-			put_page(page);
+			restore--;
+
+			if (is_zone_device_page(page))
+				put_page(page);
+			else
+				putback_lru_page(page);
 		}
 	}
 }
