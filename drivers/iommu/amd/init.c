@@ -1638,6 +1638,7 @@ static void __init free_iommu_one(struct amd_iommu *iommu)
 	amd_iommu_free_ppr_log(iommu);
 	free_ga_log(iommu);
 	iommu_unmap_mmio_space(iommu);
+	amd_iommu_iopf_uninit(iommu);
 }
 
 static void __init free_iommu_all(void)
@@ -2789,12 +2790,17 @@ static void early_enable_iommus(void)
 	}
 }
 
-static void enable_iommus_v2(void)
+static void enable_iommus_ppr(void)
 {
 	struct amd_iommu *iommu;
 
-	for_each_iommu(iommu)
+	if (!amd_iommu_gt_ppr_supported())
+		return;
+
+	for_each_iommu(iommu) {
 		amd_iommu_enable_ppr_log(iommu);
+		amd_iommu_iopf_init(iommu);
+	}
 }
 
 static void enable_iommus_vapic(void)
@@ -3130,7 +3136,7 @@ static int amd_iommu_enable_interrupts(void)
 	 * PPR and GA log interrupt for all IOMMUs.
 	 */
 	enable_iommus_vapic();
-	enable_iommus_v2();
+	enable_iommus_ppr();
 
 out:
 	return ret;
