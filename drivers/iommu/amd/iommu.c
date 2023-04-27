@@ -196,11 +196,6 @@ static struct amd_iommu *rlookup_amd_iommu(struct device *dev)
 	return __rlookup_amd_iommu(seg, PCI_SBDF_TO_DEVID(devid));
 }
 
-static struct protection_domain *to_pdomain(struct iommu_domain *dom)
-{
-	return container_of(dom, struct protection_domain, domain);
-}
-
 static struct iommu_dev_data *alloc_dev_data(struct amd_iommu *iommu, u16 devid)
 {
 	struct iommu_dev_data *dev_data;
@@ -344,6 +339,13 @@ static struct iommu_group *acpihid_device_group(struct device *dev)
 static inline bool pdev_pasid_supported(struct iommu_dev_data *dev_data)
 {
 	return (dev_data->flags & AMD_IOMMU_DEVICE_FLAG_PASID_SUP);
+}
+
+inline bool amd_iommu_pdev_pri_supported(struct pci_dev *pdev)
+{
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(&pdev->dev);
+
+	return (dev_data->flags & AMD_IOMMU_DEVICE_FLAG_PRI_SUP);
 }
 
 static u32 pdev_get_caps(struct pci_dev *pdev)
@@ -2338,6 +2340,7 @@ static struct protection_domain *protection_domain_alloc(unsigned int type)
 
 	spin_lock_init(&domain->lock);
 	INIT_LIST_HEAD(&domain->dev_list);
+	INIT_LIST_HEAD(&domain->pasid_list);
 	domain->nid = NUMA_NO_NODE;
 
 	switch (type) {
@@ -2867,6 +2870,7 @@ const struct iommu_ops amd_iommu_ops = {
 	.def_domain_type = amd_iommu_def_domain_type,
 	.dev_enable_feat = amd_iommu_dev_enable_feature,
 	.dev_disable_feat = amd_iommu_dev_disable_feature,
+	.remove_dev_pasid = amd_iommu_remove_dev_pasid,
 	.page_response = amd_iommu_page_response,
 	.default_domain_ops = &(const struct iommu_domain_ops) {
 		.attach_dev	= amd_iommu_attach_device,
