@@ -44,6 +44,11 @@ extern int amd_iommu_guest_ir;
 extern enum io_pgtable_fmt amd_iommu_pgtable;
 extern int amd_iommu_gpt_level;
 
+/* Protection domain ops */
+int iommu_sva_set_dev_pasid(struct iommu_domain *domain,
+			    struct device *dev, ioasid_t pasid);
+void amd_iommu_remove_dev_pasid(struct device *dev, ioasid_t pasid);
+
 /* SVA/PASID */
 bool amd_iommu_pasid_supported(void);
 int amd_iommu_gcr3_init(struct iommu_dev_data *dev_data, ioasid_t pasids);
@@ -72,6 +77,7 @@ int amd_iommu_pc_set_reg(struct amd_iommu *iommu, u8 bank, u8 cntr,
 /* Device capabilities */
 int amd_iommu_pdev_enable_cap_pri(struct pci_dev *pdev);
 void amd_iommu_pdev_disable_cap_pri(struct pci_dev *pdev);
+bool amd_iommu_pdev_pri_supported(struct pci_dev *pdev);
 
 /* GCR3 setup */
 int amd_iommu_set_gcr3(struct iommu_dev_data *dev_data,
@@ -190,6 +196,11 @@ static inline struct amd_iommu *get_amd_iommu_from_dev(struct device *dev)
 	struct iommu_device *iommu = iommu_get_iommu_dev(dev);
 
 	return container_of(iommu, struct amd_iommu, iommu);
+}
+
+static inline struct protection_domain *to_pdomain(struct iommu_domain *dom)
+{
+	return container_of(dom, struct protection_domain, domain);
 }
 
 bool translation_pre_enabled(struct amd_iommu *iommu);
