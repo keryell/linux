@@ -44,7 +44,10 @@ extern int amd_iommu_guest_ir;
 extern enum io_pgtable_fmt amd_iommu_pgtable;
 extern int amd_iommu_gpt_level;
 
+/* SVA/PASID */
 bool amd_iommu_pasid_supported(void);
+int amd_iommu_gcr3_init(struct iommu_dev_data *dev_data, ioasid_t pasids);
+void amd_iommu_gcr3_uninit(struct iommu_dev_data *dev_data);
 
 /* IOPF */
 int amd_iommu_iopf_init(struct amd_iommu *iommu);
