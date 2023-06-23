@@ -93,6 +93,11 @@ static inline bool pdom_is_v2_pgtbl_mode(struct protection_domain *pdom)
 	return (pdom && (pdom->pd_mode == PD_MODE_V2));
 }
 
+static inline bool pdom_is_in_pt_mode(struct protection_domain *pdom)
+{
+	return (pdom->domain.type == IOMMU_DOMAIN_IDENTITY);
+}
+
 /*
  * Allocate per device domain ID when using V2 page table
  */
@@ -1862,6 +1867,45 @@ int amd_iommu_clear_gcr3(struct iommu_dev_data *dev_data, ioasid_t pasid)
 
 	spin_unlock(&dev_data->lock);
 	return ret;
+}
+
+int amd_iommu_gcr3_init(struct iommu_dev_data *dev_data, ioasid_t pasids)
+{
+	struct protection_domain *pdom = dev_data->domain;
+	int ret = 0;
+
+	lockdep_assert_held(&dev_data->lock);
+
+	/*
+	 * We cannot support PASID w/ existing v1 page table in the same domain
+	 * since it will be nested. However, existing domain w/ v2 page table
+	 * can be used for PASID.
+	 */
+	if (!pdom_is_v2_pgtbl_mode(pdom) && !pdom_is_in_pt_mode(pdom))
+		return -EOPNOTSUPP;
+
+	/* Allocate GCR3 table */
+	if (pdom_is_in_pt_mode(pdom) && dev_data->gcr3_info.gcr3_tbl == NULL) {
+		ret = setup_gcr3_table(dev_data, pasids);
+
+		/* Update device table */
+		amd_iommu_dev_update_dte(dev_data, true);
+	}
+
+	return ret;
+}
+
+void amd_iommu_gcr3_uninit(struct iommu_dev_data *dev_data)
+{
+	lockdep_assert_held(&dev_data->lock);
+
+	/* Free GCR3 table */
+	if (pdom_is_in_pt_mode(dev_data->domain)) {
+		free_gcr3_table(dev_data);
+
+		/* Update device table */
+		amd_iommu_dev_update_dte(dev_data, true);
+	}
 }
 
 static void set_dte_entry(struct amd_iommu *iommu,
