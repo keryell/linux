@@ -1,0 +1,98 @@
+iommu/amd: SVA Support (part 3) - refactor support for GCR3 table
+
+This is part 3 of the 4-part series to introduce Share Virtual
+Address (SVA) support, which focuses on refactoring GCR3 table.
+This moves GCR3 related information from protection domain
+structure to iommu_dev_data (per device) structure.
+
+It contains the following enhancements:
+
+* Patch 1 - 3:
+  Cleanup and introduce helper function
+
+* Patch 4 - 13:
+  Introduce per device GCR3 table, invalidation based on per device and
+  code refactoring. Also introduce iommu_group_mutex_assert.
+
+* Patch 14 - 16:
+  Remove unused variable, rearrange functions to make it easy to maintain
+
+* Patch 17:
+  Introduce per device domain ID.
+
+This patch series is based on top of iommu/next branch (commit d2d00e15808).
+
+This is also available at github :
+  https://github.com/AMDESE/linux/tree/iommu_sva_part3_v7_v6.8_rc2
+
+Thanks Jason for reviewing previous versions and providing valuable feedbacks.
+
+v7: https://lore.kernel.org/linux-iommu/20240205115615.6053-1-vasant.hegde@amd.com/T/#t
+
+Changes from v6 -> v7:
+  - Rebased on top of iommu/next branch
+  - iommu: Introduce iommu_group_mutex_assert()
+    Removed 'extern' from iommu_group_mutex_assert() declaration
+  - iommu/amd: Refactor helper function for setting / clearing GCR3
+    Followed-success oriented flow
+  - Minor update to patch 11/17 description
+
+v6: https://lore.kernel.org/linux-iommu/20240125121135.8217-1-vasant.hegde@amd.com/T/#t
+
+Changes from v5 -> v6:
+  - Moved per-device-domain-ID patch to end
+  - Added condition check for iommu_group_mutex_assert()
+  - Moving per-device-domain-id allocation/free to setup_gcr3_table()/free_gcr3_table
+  - Pass iommu to setup_gcr3_table instead of passing nid
+
+v5: https://lore.kernel.org/linux-iommu/20240116165335.6043-1-vasant.hegde@amd.com/T/#t
+
+Changes from v4 -> v5:
+  - Added get_amd_iommu_from_dev_data()
+  - pass gcr3_info instead of dev_data to setup/free_gcr3_table()
+  - Added path to EXPORT iommu_group_mutex_assert
+  - Moved dev_data->domid to gcr3_info->domid
+
+
+v4: https://lore.kernel.org/linux-iommu/20231212085224.6985-1-vasant.hegde@amd.com/T/#t
+
+Changes from v3 -> v4:
+  - Added new patch to enable IOMMU GT feature early
+  - Fixed dirty tracking path to use get_amd_iommu_from_dev()
+  - Fixed duplicate flush issue in do_attach() path
+  - Removed gcr3_info->giov variable. Instead we use domain page table mode to decide
+    DTE[GIOV] bit.
+  - Free gcr3_table before calling set_dte_entry (otherwise there is a possibility
+    of its setting up gcr3 table with glx 0)
+  - Adjusted gfp_t flag for GCR3 table allocation (GPF_ATOMIC -> GFP_KERNEL)
+  - Moved below patches from invalidation improvement series to this series
+    * Remove unused flush_pasid() related functions
+      (Originally it was part of Invalidation improvement series, I had to push it to
+       this series as set_gcr3() was still using __amd_iommu_flush_tlb()).
+    * Added patch to Rearrange device flush code
+
+v3 : https://lore.kernel.org/linux-iommu/20231013151652.6008-1-vasant.hegde@amd.com/T/#t
+
+Changes from v2 -> v3:
+  - Dropped "iommu/amd: Use struct protection_domain in helper functions" as flush related
+    functions are already fixed and set_gcr3 related functions is reworked in this series.
+  - Removed moving to_pdomain() function from this series. It will be introduced
+    in SVA series where it will be used.
+  - Added per device domain ID and per device invalidation functions
+  - Added functions to flush TLB for the given device
+  - Added Review-by tags
+
+v2 : https://lore.kernel.org/linux-iommu/20230816174031.634453-1-vasant.hegde@amd.com/T/#t
+
+Changes from v1 - v2:
+  - Dropped iommu_v2 module related support as newly introduced Part2
+    removed iommu_v2 module.
+  - Moved Patch 'Use struct protection_domain in helper functions' from Part1 to
+    Part3
+  - Updated get_amd_iommu_from_dev() to retrieve iommu from device structure
+  - Removed 'PD_MODE_PT'
+
+v1 : https://lore.kernel.org/linux-iommu/20230808100232.5977-1-vasant.hegde@amd.com/T/#t
+
+Thank you,
+Vasant / Suravee
