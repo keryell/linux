@@ -842,6 +842,8 @@ struct iommu_dev_data {
 	u8 ppr          :1;		  /* Enable device PPR support */
 	bool use_vapic;			  /* Enable device to use vapic mode */
 	bool defer_attach;
+	/* Per device domain ID. Used with V2 page table */
+	u16 domid;
 
 	struct ratelimit_state rs;        /* Ratelimit IOPF messages */
 };
