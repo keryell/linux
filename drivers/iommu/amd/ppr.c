@@ -282,20 +282,77 @@ out:
 int amd_iommu_iopf_remove_device(struct amd_iommu *iommu, struct device *dev)
 {
 	unsigned long flags;
-	int ret = -EINVAL;
 
 	raw_spin_lock_irqsave(&iommu->lock, flags);
 
-	if (!iommu->iopf_queue)
-		goto out;
-
-	ret = iopf_queue_remove_device(iommu->iopf_queue, dev);
-	if (ret) {
-		pr_warn("Failed to remove device (0x%x) from iopf queue\n",
-			dev->id);
+	if (!iommu->iopf_queue) {
+		raw_spin_unlock_irqrestore(&iommu->lock, flags);
+		return -EINVAL;
 	}
 
-out:
+	iopf_queue_remove_device(iommu->iopf_queue, dev);
+
 	raw_spin_unlock_irqrestore(&iommu->lock, flags);
+	return 0;
+}
+
+static int iopf_update_device(struct device *dev, bool enable)
+{
+	struct protection_domain *pdom;
+	struct pci_dev *pdev = dev_is_pci(dev) ? to_pci_dev(dev) : NULL;
+	struct amd_iommu *iommu = get_amd_iommu_from_dev(dev);
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);
+	int ret = 0;
+
+	if (!pdev || !dev_data)
+		return -EINVAL;
+
+	pdom = dev_data->domain;
+	if (!dev_data->domain)
+		return -EINVAL;
+
+	spin_lock(&dev_data->lock);
+
+	if (enable) {
+		if (dev_data->ppr)
+			goto out;
+
+		ret = amd_iommu_iopf_add_device(iommu, dev);
+		if (ret)
+			goto out;
+
+		dev_data->ppr = true;
+	} else {
+		ret = amd_iommu_iopf_remove_device(iommu, dev);
+		dev_data->ppr = false;
+	}
+
+	amd_iommu_dev_update_dte(dev_data, true);
+
+out:
+	spin_unlock(&dev_data->lock);
 	return ret;
+}
+
+int amd_iommu_iopf_enable_device(struct device *dev)
+{
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);
+
+	if (!dev_data)
+		return -EINVAL;
+
+	if (!dev_data->ats_enabled || !dev_data->pri_enabled)
+		return -EINVAL;
+
+	return iopf_update_device(dev, true);
+}
+
+int amd_iommu_iopf_disable_device(struct device *dev)
+{
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);
+
+	if (!dev_data || !dev_data->pri_enabled)
+		return -EINVAL;
+
+	return iopf_update_device(dev, false);
 }
