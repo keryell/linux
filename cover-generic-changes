@@ -1,1 +1,3 @@
-Patches queued for v6.8 merge window
+Patches queued for v6.8 merge window and inflight patches.
+
+Lu Baolu's IOPF series : https://lore.kernel.org/linux-iommu/20231220012332.168188-1-baolu.lu@linux.intel.com/
