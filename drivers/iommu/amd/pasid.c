@@ -225,7 +225,8 @@ void amd_iommu_remove_dev_pasid(struct device *dev, ioasid_t pasid)
 	sva_pdom = to_pdomain(domain);
 
 	/* Ensure that all queued faults have been processed */
-	iopf_queue_flush_dev(dev);
+	if (dev_data->pri_enabled)
+		iopf_queue_flush_dev(dev);
 
 	spin_lock_irqsave(&sva_pdom->lock, flags);
 
