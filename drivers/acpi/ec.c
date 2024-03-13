@@ -1267,8 +1267,12 @@ static void acpi_ec_event_handler(struct work_struct *work)
 	spin_unlock_irq(&ec->lock);
 }
 
-static void clear_gpe_and_advance_transaction(struct acpi_ec *ec, bool interrupt)
+static void acpi_ec_handle_interrupt(struct acpi_ec *ec)
 {
+	unsigned long flags;
+
+	spin_lock_irqsave(&ec->lock, flags);
+
 	/*
 	 * Clear GPE_STS upfront to allow subsequent hardware GPE_STS 0->1
 	 * changes to always trigger a GPE interrupt.
@@ -1285,16 +1289,6 @@ static void clear_gpe_and_advance_transaction(struct acpi_ec *ec, bool interrupt
 		acpi_clear_gpe(NULL, ec->gpe);
 
 	advance_transaction(ec, true);
-}
-
-static void acpi_ec_handle_interrupt(struct acpi_ec *ec)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&ec->lock, flags);
-
-	clear_gpe_and_advance_transaction(ec, true);
-
 	spin_unlock_irqrestore(&ec->lock, flags);
 }
 
@@ -2110,7 +2104,7 @@ bool acpi_ec_dispatch_gpe(void)
 	if (acpi_ec_gpe_status_set(first_ec)) {
 		pm_pr_dbg("ACPI EC GPE status set\n");
 
-		clear_gpe_and_advance_transaction(first_ec, false);
+		advance_transaction(first_ec, false);
 		work_in_progress = acpi_ec_work_in_progress(first_ec);
 	}
 
