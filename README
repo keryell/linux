@@ -24,6 +24,21 @@ If you are just interested by always having the latest kernel with
 this bug fix, the v6.8-iommu-sva-part4-v7+pmc-10ms-delay branch points
 to the latest 6.8.x branch with the fix from this repository.
 
+To compile this kernel in a nutshell:
+git clone --depth=1 --branch v6.8-iommu-sva-part4-v7 git@github.com:AMD-SW/linux
+cd linux
+# Often people compile a kernel from source code by reusing
+# their current config with something like:
+cp /boot/config-`uname -r` <your_build_dir>/.config
+# But if you do not have a `.config` file modern enough to start with,
+# you can get one for Debian/Ubuntu with:
+wget https://gist.github.com/keryell/55c57d5f0280de8943fb8cca64059764/raw/27fdbb7c86060ec58d8470fe391d2cd633f6e89f/.config
+# To compile and make some Debian/Ubuntu packages:
+make -j `nproc` bindeb-pkg
+# Install the kernel. The exact names will depend on your configuration
+sudo apt reinstall ../linux-headers-6.8.7+iommu-sva-part4-v7+_6.8.7-00095-gef3f1f49a69d-1_amd64.deb ../linux-image-6.8.7+iommu-sva-part4-v7+_6.8.7-00095-gef3f1f49a69d-1_amd64.deb ../linux-libc-dev_6.8.7-00095-gef3f1f49a69d-1_amd64.deb
+```
+
 
 Generic README
 --------------
