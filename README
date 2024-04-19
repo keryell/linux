@@ -7,7 +7,23 @@ AMD version
 This is a branch used by AMD projects using RyzenAI XDNA accelerator
 like https://github.com/Xilinx/mlir-aie
 
-This is a stable Linux version with some patches for IOMMU SVA support.
+This is a stable Linux version with some patches for IOMMU SVA support
+and a bug fix for AMD PMC about sleep state.
+
+The kernels are provided as branches pointing to some versions, like
+v6.8.7-iommu-sva-part4-v7.
+
+If you are just interested by always having the latest kernel, the
+v6.8-iommu-sva-part4-v7 branch points to the latest 6.8.x branch from
+this repository.
+
+For the bug fix for AMD PMC about sleep state, there are also the
+branches per kernel version, such as v6.8.7-iommu-sva-part4-v7+pmc-10ms-delay
+
+If you are just interested by always having the latest kernel with
+this bug fix, the v6.8-iommu-sva-part4-v7+pmc-10ms-delay branch points
+to the latest 6.8.x branch with the fix from this repository.
+
 
 Generic README
 --------------
